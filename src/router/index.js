@@ -15,13 +15,15 @@ const routes = [
   {
     path: '/auth/login', 
     name: "Login",
-    component: Login
+    component: Login,
+    meta: { hideSidebar: true }
   },
 
   {
     path: '/pages/dashboard', 
     name: "Dashboard",
-    component: Dashboard
+    component: Dashboard,
+    meta: { hideSidebar: false }
   },
 
   {
