@@ -4,22 +4,27 @@
     <header class="page-header">
       <div class="header-text">
         <h1>Telemetry Logs</h1>
-        <p>Real-time voltage and current readings (2s Interval)</p>
+        <p>Real-time stream (Displaying last 100 records)</p>
       </div>
-      <button class="export-btn">
+      <button class="export-btn" @click="exportCSV">
         <span>📥</span> Export CSV
       </button>
     </header>
 
     <div class="card table-card">
       <div class="table-actions">
-        <input type="text" placeholder="Search logs..." class="search-input" />
+        <input 
+          type="text" 
+          v-model="searchQuery" 
+          placeholder="Search logs..." 
+          class="search-input" 
+        />
+        
         <div class="filter-group">
-          <select class="filter-select">
-            <option>All Events</option>
-            <option>Normal</option>
-            <option>Overload</option>
-            <option>Voltage Spike</option>
+          <select v-model="statusFilter" class="filter-select">
+            <option value="All">All Events</option>
+            <option value="NORMAL">Normal</option>
+            <option value="ALARM">Overload / Alarm</option>
           </select>
         </div>
       </div>
@@ -37,14 +42,26 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(log, index) in dummyLogs" :key="index">
-              <td class="timestamp">{{ log.timestamp }}</td>
+            <tr v-if="loading">
+              <td colspan="6" style="text-align: center; padding: 20px; color: #999;">
+                Connecting to live stream...
+              </td>
+            </tr>
+
+            <tr v-else-if="filteredLogs.length === 0">
+              <td colspan="6" style="text-align: center; padding: 20px; color: #999;">
+                No logs found matching your filters.
+              </td>
+            </tr>
+
+            <tr v-for="log in filteredLogs" :key="log.id">
+              <td class="timestamp">{{ formatDate(log.timestamp) }}</td>
               <td>{{ log.deviceId }}</td>
               <td>{{ log.voltage }} V</td>
               <td>{{ log.current }} A</td>
-              <td>{{ log.power }} W</td>
+              <td>{{ (log.voltage * log.current).toFixed(1) }} W</td>
               <td>
-                <span :class="['status-badge', log.status.toLowerCase()]">
+                <span :class="['status-badge', getStatusClass(log.status)]">
                   {{ log.status }}
                 </span>
               </td>
@@ -54,9 +71,7 @@
       </div>
       
       <div class="pagination">
-        <button disabled>&laquo; Prev</button>
-        <span class="page-info">Page 1 of 24</span>
-        <button>Next &raquo;</button>
+        <span class="page-info">Showing latest {{ filteredLogs.length }} records</span>
       </div>
     </div>
     
@@ -64,187 +79,137 @@
 </template>
 
 <script>
+import { db } from '../firebase'; 
+import { collection, query, orderBy, limit, onSnapshot } from "firebase/firestore";
+
 export default {
   name: 'LogsPage',
   data() {
     return {
-      // Static data simulating 2-second updates
-      dummyLogs: [
-        { timestamp: '2025-12-06 14:30:10', deviceId: 'Outlet-01', voltage: '220.5', current: '1.20', power: '264.6', status: 'Normal' },
-        { timestamp: '2025-12-06 14:30:08', deviceId: 'Outlet-01', voltage: '220.4', current: '1.21', power: '266.6', status: 'Normal' },
-        { timestamp: '2025-12-06 14:30:06', deviceId: 'Outlet-01', voltage: '220.1', current: '1.19', power: '261.9', status: 'Normal' },
-        { timestamp: '2025-12-06 14:30:04', deviceId: 'Outlet-01', voltage: '228.0', current: '12.5', power: '2850.0', status: 'Overload' },
-        { timestamp: '2025-12-06 14:30:02', deviceId: 'Outlet-01', voltage: '219.8', current: '1.20', power: '263.7', status: 'Normal' },
-        { timestamp: '2025-12-06 14:30:00', deviceId: 'Outlet-01', voltage: '220.0', current: '1.18', power: '259.6', status: 'Normal' },
-        { timestamp: '2025-12-06 14:29:58', deviceId: 'Outlet-01', voltage: '220.1', current: '1.20', power: '264.1', status: 'Normal' },
-        { timestamp: '2025-12-06 14:29:56', deviceId: 'Outlet-01', voltage: '220.2', current: '1.20', power: '264.2', status: 'Normal' },
-        { timestamp: '2025-12-06 14:29:54', deviceId: 'Outlet-01', voltage: '220.1', current: '1.21', power: '266.3', status: 'Normal' },
-        { timestamp: '2025-12-06 14:29:52', deviceId: 'Outlet-01', voltage: '220.3', current: '1.19', power: '262.1', status: 'Normal' },
-      ]
+      logs: [],
+      loading: true,
+      searchQuery: '',
+      statusFilter: 'All',
+      unsub: null
+    }
+  },
+  computed: {
+    // Client-side filtering for instant search results
+    filteredLogs() {
+      return this.logs.filter(log => {
+        // 1. Filter by Status
+        if (this.statusFilter !== 'All' && log.status !== this.statusFilter) {
+          return false;
+        }
+
+        // 2. Filter by Search Query (Date, ID, or Values)
+        if (this.searchQuery) {
+          const searchLower = this.searchQuery.toLowerCase();
+          const dateStr = this.formatDate(log.timestamp).toLowerCase();
+          
+          return (
+            dateStr.includes(searchLower) ||
+            log.deviceId.toLowerCase().includes(searchLower) ||
+            log.status.toLowerCase().includes(searchLower)
+          );
+        }
+
+        return true;
+      });
+    }
+  },
+  mounted() {
+    // --- LIVE LISTENER ---
+    // This connects to Firestore and stays open. 
+    // Whenever a new log is added, this runs automatically.
+    const q = query(
+      collection(db, "logs"), 
+      orderBy("timestamp", "desc"), 
+      limit(100) // Keep the table fast by only showing last 100
+    );
+
+    this.unsub = onSnapshot(q, (snapshot) => {
+      this.logs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      this.loading = false;
+    }, (error) => {
+      console.error("Error fetching logs:", error);
+      this.loading = false;
+    });
+  },
+  beforeUnmount() {
+    // Stop listening when user leaves the page to save data usage
+    if (this.unsub) {
+      this.unsub();
+    }
+  },
+  methods: {
+    formatDate(timestamp) {
+      if (!timestamp) return '--';
+      // Convert Firebase Timestamp to JS Date
+      const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+      return date.toLocaleString('en-US'); // e.g. "1/15/2026, 2:30:00 PM"
+    },
+    
+    getStatusClass(status) {
+      // Returns CSS class based on status text
+      if (status === 'NORMAL') return 'normal';
+      if (status === 'ALARM') return 'overload';
+      return '';
+    },
+
+    exportCSV() {
+      // 1. Create CSV Header
+      let csvContent = "data:text/csv;charset=utf-8,";
+      csvContent += "Timestamp,Device ID,Voltage (V),Current (A),Power (W),Status\n";
+
+      // 2. Add Rows
+      this.filteredLogs.forEach(log => {
+        const time = this.formatDate(log.timestamp).replace(',', ''); // Remove commas for CSV safety
+        const power = (log.voltage * log.current).toFixed(1);
+        csvContent += `${time},${log.deviceId},${log.voltage},${log.current},${power},${log.status}\n`;
+      });
+
+      // 3. Trigger Download
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", "telemetry_logs.csv");
+      document.body.appendChild(link);
+      link.click();
     }
   }
 }
 </script>
 
 <style scoped>
-/* 1. Page Container - Fills the router-view area */
-.page-container {
-  padding: 30px;
-  background-color: #F5F7FA; /* Light gray background to match your theme */
-  min-height: 100vh; /* Ensures it covers the full height */
-  font-family: 'Segoe UI', sans-serif;
-}
+/* Reuse existing styles */
+.page-container { padding: 30px; background-color: #F5F7FA; min-height: 100vh; font-family: 'Segoe UI', sans-serif; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+.header-text h1 { margin: 0; color: #2D3436; font-size: 1.8rem; font-weight: 700; }
+.header-text p { margin: 5px 0 0; color: #636e72; font-size: 0.9rem; }
 
-/* 2. Header Styles */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 25px;
-}
+.export-btn { background-color: white; border: 1px solid #E0E0E0; padding: 10px 15px; border-radius: 8px; color: #2D3436; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.2s; }
+.export-btn:hover { background-color: #F1F2F6; }
 
-.header-text h1 {
-  margin: 0;
-  color: #2D3436;
-  font-size: 1.8rem;
-  font-weight: 700;
-}
+.card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border: 1px solid #E0E0E0; overflow: hidden; }
+.table-actions { padding: 20px; border-bottom: 1px solid #F1F2F6; display: flex; gap: 15px; }
+.search-input, .filter-select { padding: 10px; border: 1px solid #E0E0E0; border-radius: 6px; font-size: 0.9rem; outline: none; }
+.search-input { width: 300px; }
+.search-input:focus, .filter-select:focus { border-color: #1B5E20; }
 
-.header-text p {
-  margin: 5px 0 0;
-  color: #636e72;
-  font-size: 0.9rem;
-}
+.table-responsive { width: 100%; overflow-x: auto; height: 500px; overflow-y: auto; } /* Added scrolling height */
+table { width: 100%; border-collapse: collapse; text-align: left; }
+thead th { background-color: #F8F9FA; padding: 15px 20px; font-size: 0.85rem; color: #636e72; font-weight: 600; border-bottom: 1px solid #E0E0E0; position: sticky; top: 0; } /* Sticky header */
+tbody td { padding: 15px 20px; border-bottom: 1px solid #F1F2F6; font-size: 0.9rem; color: #2D3436; }
+.timestamp { font-family: 'Courier New', monospace; color: #636e72; }
 
-.export-btn {
-  background-color: white;
-  border: 1px solid #E0E0E0;
-  padding: 10px 15px;
-  border-radius: 8px;
-  color: #2D3436;
-  font-weight: 600;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  transition: background 0.2s;
-}
+.status-badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; display: inline-block; }
+.status-badge.normal { background-color: #E8F5E9; color: #1B5E20; }
+.status-badge.overload { background-color: #FFEBEE; color: #C0392B; }
 
-.export-btn:hover {
-  background-color: #F1F2F6;
-}
-
-/* 3. Table Card Styles */
-.card {
-  background: white;
-  border-radius: 12px;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.02);
-  border: 1px solid #E0E0E0;
-  overflow: hidden; /* Ensures corners clip content */
-}
-
-.table-actions {
-  padding: 20px;
-  border-bottom: 1px solid #F1F2F6;
-  display: flex;
-  gap: 15px;
-}
-
-.search-input, .filter-select {
-  padding: 10px;
-  border: 1px solid #E0E0E0;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  outline: none;
-}
-
-.search-input {
-  width: 300px;
-}
-
-.search-input:focus, .filter-select:focus {
-  border-color: #1B5E20; /* Brand green focus */
-}
-
-/* 4. Table Styles */
-.table-responsive {
-  width: 100%;
-  overflow-x: auto;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  text-align: left;
-}
-
-thead th {
-  background-color: #F8F9FA;
-  padding: 15px 20px;
-  font-size: 0.85rem;
-  color: #636e72;
-  font-weight: 600;
-  border-bottom: 1px solid #E0E0E0;
-}
-
-tbody td {
-  padding: 15px 20px;
-  border-bottom: 1px solid #F1F2F6;
-  font-size: 0.9rem;
-  color: #2D3436;
-}
-
-.timestamp {
-  font-family: 'Courier New', monospace;
-  color: #636e72;
-}
-
-/* 5. Status Badges */
-.status-badge {
-  padding: 4px 10px;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  display: inline-block;
-}
-
-.status-badge.normal {
-  background-color: #E8F5E9; /* Light Green */
-  color: #1B5E20; /* Dark Green */
-}
-
-.status-badge.overload {
-  background-color: #FFEBEE; /* Light Red */
-  color: #C0392B; /* Dark Red */
-}
-
-/* 6. Pagination */
-.pagination {
-  padding: 15px 20px;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 15px;
-  background-color: #FDFDFD;
-}
-
-.pagination button {
-  background: white;
-  border: 1px solid #E0E0E0;
-  padding: 5px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  color: #636e72;
-}
-
-.pagination button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.page-info {
-  font-size: 0.9rem;
-  color: #636e72;
-}
+.pagination { padding: 15px 20px; display: flex; justify-content: flex-end; align-items: center; gap: 15px; background-color: #FDFDFD; }
+.page-info { font-size: 0.9rem; color: #636e72; }
 </style>

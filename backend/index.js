@@ -7,7 +7,8 @@ const serviceAccount = require('./serviceAccountKey.json');
 
 // 1. Initialize Firebase
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert(serviceAccount),
+  projectId: "voltagecurrent-monitoring"
 });
 
 const db = admin.firestore();

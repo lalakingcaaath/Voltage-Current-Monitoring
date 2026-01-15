@@ -1,9 +1,8 @@
-// Import the functions you need from the SDKs you need
+// Import the functions you need
 import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
+// 1. ADD THIS LINE: We need Firestore for the dashboard
+import { getFirestore } from "firebase/firestore";
 
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
   apiKey: "AIzaSyArInqYx95PbbD2WXwJK3BP2-zbr5MvlTU",
   authDomain: "voltagecurrent-monitoring.firebaseapp.com",
@@ -16,4 +15,9 @@ const firebaseConfig = {
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
+
+// 2. INITIALIZE AND EXPORT THE DATABASE
+const db = getFirestore(app);
+
+// 3. Export 'db' so Dashboard.vue can use it
+export { db };
