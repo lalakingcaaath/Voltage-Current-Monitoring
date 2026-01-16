@@ -1,7 +1,10 @@
-#include <ESP8266WiFi.h>       // REQUIRED: Added this library
+#include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include <math.h>
 
-#define ADC_PIN A0
+/************ PIN DEFINITIONS ************/
+#define VOLTAGE_PIN D3      // Voltage sensor enable/select pin
+#define ADC_PIN A0          // Shared ADC input
 #define RELAY_PIN D1    
 #define BUZZER_PIN D2   
 
@@ -15,160 +18,155 @@ const int mqtt_port = 8883;
 const char* mqtt_user = "caseeey";
 const char* mqtt_password = "Kuyamopio17";
 
-// Define Secure Client for HiveMQ
+// Secure MQTT client
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 
 /************ SENSOR SETTINGS ************/
 const int voltageSamples = 1000;
-float voltageCalibration = 650.0;
 const int currentSamples = 1000;
-float acsSensitivity = 100.0; 
-float maxVoltage = 260.0; 
-float maxCurrent = 0.50; 
 
-// Function Prototypes
-float readZMPTVoltage();
+float adcReference = 3.3;
+float voltageCalibration = 235.0;   // Adjust during calibration
+float acsSensitivity = 100.0;       // mV/A
+
+float maxVoltage = 260.0;
+float maxCurrent = 0.50;
+
+/************ FUNCTION PROTOTYPES ************/
+float readACVoltage();
 float readACS712Current();
 void setupWiFi();
 void reconnect();
 
 void setup() {
   Serial.begin(9600);
-  
+
+  pinMode(VOLTAGE_PIN, OUTPUT);   // Voltage sensor enable
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // Start with relay OFF (safe)
-  digitalWrite(RELAY_PIN, HIGH);  
-  digitalWrite(BUZZER_PIN, LOW); 
+  digitalWrite(VOLTAGE_PIN, LOW); // Sensor OFF initially
+  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(BUZZER_PIN, HIGH);
 
-  // 1. Connect to Wi-Fi
   setupWiFi();
 
-  // 2. Setup Secure MQTT
-  // REQUIRED: This line allows the ESP to trust HiveMQ Cloud
-  espClient.setInsecure(); 
+  espClient.setInsecure();
   client.setServer(mqtt_server, mqtt_port);
+
+  randomSeed(analogRead(A0));
 }
 
 void loop() {
-  // 3. ADDED: Connection Maintenance
-  // Without this, the device will not stay connected
   if (!client.connected()) {
     reconnect();
   }
-  client.loop(); 
+  client.loop();
 
-  // --- EXISTING SENSOR LOGIC (UNCHANGED) ---
-  float acVoltage = readZMPTVoltage();
+  float acVoltage = readACVoltage();
   float acCurrent = readACS712Current();
 
-  // Relay protection logic
   bool fault = false;
   if (acVoltage > maxVoltage) fault = true;
   if (acCurrent > maxCurrent) fault = true;
 
   if (fault) {
-    digitalWrite(RELAY_PIN, LOW);   // Cut power
-    digitalWrite(BUZZER_PIN, HIGH); // Turn buzzer ON
+    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
   } else {
-    digitalWrite(RELAY_PIN, HIGH);  // Allow power
-    digitalWrite(BUZZER_PIN, LOW);  // Turn buzzer OFF
+    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, LOW);
   }
 
-  // --- ADDED: Publish Data to Dashboard ---
-  // Send data every 2 seconds without blocking the loop
   static unsigned long lastMsg = 0;
   if (millis() - lastMsg > 2000) {
     lastMsg = millis();
 
-    // Create JSON payload
-    String payload = "{\"voltage\": " + String(acVoltage, 1) + 
-                     ", \"current\": " + String(acCurrent, 2) + 
+    String payload = "{\"voltage\": " + String(acVoltage, 1) +
+                     ", \"current\": " + String(acCurrent, 2) +
                      ", \"status\": \"" + (fault ? "ALARM" : "NORMAL") + "\"}";
-    
-    Serial.print("Publishing: ");
+
     Serial.println(payload);
-    
-    // Send to HiveMQ topic
     client.publish("home/telemetry", payload.c_str());
   }
 }
 
-/* ================= WIFI SETUP ================= */
+/* ================= WIFI ================= */
 void setupWiFi() {
-  delay(10);
-  Serial.println();
   Serial.print("Connecting to Wi-Fi");
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nConnected to Wi-Fi");
+  Serial.println("\nConnected");
 }
 
-/* ================= RECONNECT ================= */
+/* ================= MQTT ================= */
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random Client ID
     String clientId = "ESP8266-" + String(random(0xffff), HEX);
-    
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
-      Serial.println("connected");
+      Serial.println("MQTT connected");
     } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5s");
       delay(5000);
     }
   }
 }
 
-/* ================= ZMPT101B VOLTAGE (UNCHANGED) ================= */
-float readZMPTVoltage() {
-  float voltageSumSquares = 0;
-  float voltageOffset = 0;
+/* ================= AC VOLTAGE (D3 CONTROLLED) ================= */
+float readACVoltage() {
+  float sumSquares = 0;
+  float offset = 0;
 
+  // Enable voltage sensor
+  digitalWrite(VOLTAGE_PIN, HIGH);
+  delay(2);  // Allow signal to stabilize
+
+  // Offset calculation
   for (int i = 0; i < 300; i++) {
-    voltageOffset += analogRead(ADC_PIN);
+    offset += analogRead(ADC_PIN);
     delayMicroseconds(100);
   }
-  voltageOffset /= 300.0;
+  offset /= 300.0;
 
+  // RMS sampling
   for (int i = 0; i < voltageSamples; i++) {
-    float adcValue = analogRead(ADC_PIN);
-    float centered = adcValue - voltageOffset;
-    voltageSumSquares += centered * centered;
+    float sample = analogRead(ADC_PIN) - offset;
+    sumSquares += sample * sample;
     delayMicroseconds(100);
   }
 
-  float voltageRMS = sqrt(voltageSumSquares / voltageSamples);
-  float sensorVoltage = (voltageRMS * 3.3) / 1023.0;
+  // Disable voltage sensor
+  digitalWrite(VOLTAGE_PIN, LOW);
+
+  float adcRMS = sqrt(sumSquares / voltageSamples);
+  float sensorVoltage = (adcRMS * adcReference) / 1023.0;
+
   return sensorVoltage * voltageCalibration;
 }
 
-/* ================= ACS712 CURRENT (UNCHANGED) ================= */
+/* ================= ACS712 CURRENT ================= */
 float readACS712Current() {
-  float currentSumSquares = 0;
-  float currentOffset = 0;
+  float sumSquares = 0;
+  float offset = 0;
 
   for (int i = 0; i < 300; i++) {
-    currentOffset += analogRead(ADC_PIN);
+    offset += analogRead(ADC_PIN);
     delayMicroseconds(100);
   }
-  currentOffset /= 300.0;
+  offset /= 300.0;
 
   for (int i = 0; i < currentSamples; i++) {
-    float adcValue = analogRead(ADC_PIN);
-    float centered = adcValue - currentOffset;
-    currentSumSquares += centered * centered;
+    float sample = analogRead(ADC_PIN) - offset;
+    sumSquares += sample * sample;
     delayMicroseconds(100);
   }
 
-  float currentRMS = sqrt(currentSumSquares / currentSamples);
-  float sensorVoltage = (currentRMS * 3.3) / 1023.0;
-  return (sensorVoltage * 1000.0) / acsSensitivity;
+  float adcRMS = sqrt(sumSquares / currentSamples);
+  float sensorVoltage = (adcRMS * adcReference) / 1023.0;
+
+  float current = (sensorVoltage * 1000.0) / acsSensitivity;
+  return current - 0.07;
 }
